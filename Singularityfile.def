@@ -1,5 +1,5 @@
 Bootstrap: docker
-From: ros:melodic
+From: osrf/ros:melodic-desktop-full
 
 %setup
     mkdir -p ${SINGULARITY_ROOTFS}/jackal_ws/src
@@ -8,24 +8,47 @@ From: ros:melodic
     . /jackal_ws/src/the-barn-challenge
 
 %post -c /bin/bash
-    apt -y update; apt-get -y install python3-venv
-    python3 -m venv /venv
-    export PATH="/venv/bin:$PATH"
-    pip3 install --upgrade pip
-    pip3 install defusedxml rospkg netifaces numpy
-    
-    cd /jackal_ws/src
-    git clone https://github.com/jackal/jackal.git --branch melodic-devel
-    git clone https://github.com/jackal/jackal_simulator.git --branch melodic-devel
-    git clone https://github.com/jackal/jackal_desktop.git --branch melodic-devel
-    git clone https://github.com/utexas-bwi/eband_local_planner.git
+    # System dependencies
+    apt-get -y update && apt-get -y upgrade
+    apt-get -y install \
+        git curl \
+        python3-pip python3-venv \
+        libcdd-dev libgmp-dev \
+        ros-melodic-jackal-simulator \
+        ros-melodic-jackal-desktop \
+        ros-melodic-jackal-navigation
 
+    ln -s /usr/include/cdd /usr/include/cddlib
+
+    # Python environment
+    curl -LsSf https://astral.sh/uv/install.sh | sh
+    export PATH="/root/.local/bin:$PATH"
+
+    mv /root/.local/bin/uv /bin/uv
+    mv /root/.local/bin/uvx /bin/uvx
+    export UV_PYTHON_INSTALL_DIR="/opt/uv_python"
+
+    uv venv /opt/venv --python 3.9
+    export VIRTUAL_ENV="/opt/venv"
+    export PATH="$VIRTUAL_ENV/bin:$PATH"
+
+    uv pip install \
+        defusedxml \
+        rospkg \
+        netifaces \
+        numpy \
+        transforms3d \
+        scipy \
+        scikit-learn \
+        pycddlib
+    
+    # Build workspace
     source /opt/ros/melodic/setup.bash
-    cd ..
-    rosdep init; rosdep update
-    rosdep install -y --from-paths . --ignore-src --rosdistro=melodic
-    source devel/setup.bash
+    cd /jackal_ws
+    rosdep init && rosdep update
     catkin_make
 
 %environment
-    export PATH="/venv/bin:$PATH"
+    export VIRTUAL_ENV="/opt/venv"
+    export PATH="$VIRTUAL_ENV/bin:$PATH"
+    export UV_PYTHON_INSTALL_DIR="/opt/uv_python"

@@ -47,7 +47,9 @@ class NavigationNode:
         self.obstacle_detector = None
         self.obstacles = None
 
-        self.voronoi = Voronoi(pos=np.zeros(2), safety_radius=0.0, xlim=[-5,5], ylim=[-5,5])
+        
+        safety_radius = 0.3 #math.sqrt((0.420**2 + 0.310**2))/2
+        self.voronoi = Voronoi(pos=np.zeros(2), safety_radius=safety_radius, xlim=[-5,5], ylim=[-5,5])
     
     def odom_callback(self, msg):
         self.odom_data = msg
@@ -208,8 +210,8 @@ class NavigationNode:
             self.voronoi()
 
             msg = Twist()
-            msg.linear.x = 0.0
-            msg.angular.z = 0.0
+            msg.linear.x = 0.1
+            msg.angular.z = 0.1
 
             self.pub.publish(msg)
             self.publish_markers()
