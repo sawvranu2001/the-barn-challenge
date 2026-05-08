@@ -1,0 +1,36 @@
+services:
+  ros_melodic:
+    build:
+      context: .
+      dockerfile: Dockerfile
+      args:
+        USERNAME: ubuntu
+        USER_UID: ${UID:-1000}
+        USER_GID: ${GID:-1000}
+    image: ros:the-barn-challenge
+    container_name: the-barn-challenge
+    privileged: true
+    network_mode: host
+    
+    environment:
+      - DISPLAY=${DISPLAY}
+      - NVIDIA_DRIVER_CAPABILITIES=all
+      - NVIDIA_VISIBLE_DEVICES=all
+      - QT_X11_NO_MITSHM=1
+      - __GLX_VENDOR_LIBRARY_NAME=nvidia
+      - __NV_PRIME_RENDER_OFFLOAD=1
+
+    volumes:
+      - .:/home/ubuntu/jackal_ws/src/the-barn-challenge
+      - /tmp/.X11-unix:/tmp/.X11-unix
+    
+    tty: true
+    stdin_open: true
+
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: all
+              capabilities: [gpu]

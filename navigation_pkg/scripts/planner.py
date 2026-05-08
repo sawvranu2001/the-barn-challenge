@@ -1,0 +1,224 @@
+#!/usr/bin/env python
+
+import rospy
+from geometry_msgs.msg import Twist
+from sensor_msgs.msg import LaserScan
+from nav_msgs.msg import Odometry
+from gazebo_msgs.msg import ModelStates
+import transforms3d.euler as t3d_euler
+
+from visualization_msgs.msg import Marker, MarkerArray
+from geometry_msgs.msg import Point
+
+import math
+import numpy as np
+
+from obstacle_detector import ObstacleDetector
+from voronoi import Voronoi
+
+class NavigationNode:
+    def __init__(self):
+        rospy.init_node('navigation_node')
+        self.pub = rospy.Publisher('/cmd_vel', Twist, queue_size=10)
+        
+        rospy.Subscriber('/front/scan', LaserScan, self.lidar_callback)
+        rospy.Subscriber('/odometry/filtered', Odometry, self.odom_callback)
+        rospy.Subscriber('/gazebo/model_states', ModelStates, self.model_callback)
+
+        
+        init_pos = rospy.get_param('~init_position')
+        goal_pos = rospy.get_param('~goal_position')
+
+        self.init_coor = (init_pos[0], init_pos[1])
+        self.goal_coor = (init_pos[0] + goal_pos[0], init_pos[1] + goal_pos[1])
+        
+        # Other parameters.
+        self.max_range = 4.0
+
+        # Placeholders for sensor data.
+        self.lidar_ranges = None
+        self.odom_data = None
+        self.model_data = None
+
+        # Others
+        self.marker_pub = rospy.Publisher('/obstacle_markers', MarkerArray, queue_size=1)
+        self.lidar_frame_id = "front_laser"
+
+        self.obstacle_detector = None
+        self.obstacles = None
+
+        self.voronoi = Voronoi(pos=np.zeros(2), safety_radius=0.0, xlim=[-5,5], ylim=[-5,5])
+    
+    def odom_callback(self, msg):
+        self.odom_data = msg
+        x = msg.pose.pose.position.x
+        y = msg.pose.pose.position.y
+        orientation_q = msg.pose.pose.orientation
+        q_ros = [orientation_q.w, orientation_q.x, orientation_q.y, orientation_q.z]
+        roll, pitch, yaw = t3d_euler.quat2euler(q_ros, axes='sxyz')
+        theta = yaw
+        if theta < -math.pi:
+            theta += 2*math.pi
+        elif theta > math.pi:
+            theta -= 2*math.pi
+        self.pos = np.array([x + self.init_coor[0], y + self.init_coor[1]])
+        self.theta = theta
+    
+    def model_callback(self, msg):
+        self.model_data = msg
+
+    def lidar_callback(self, msg):
+        self.lidar_ranges = msg.ranges
+        
+        if self.obstacle_detector is None:
+            # Use ROS message data instead of hardcoded degrees
+            min_angle = msg.angle_min
+            delta_angle = msg.angle_increment
+            
+            rospy.loginfo(f"Initializing ObstacleDetector with min_angle={min_angle:.2f}, delta_angle={delta_angle:.4f}")
+            self.obstacle_detector = ObstacleDetector(
+                delta_angle=delta_angle, min_angle=min_angle,
+                eps_l=0.06, dk=5, s_num=6,  p_min=4,  l_min=0.05,
+            )
+
+        try:
+            self.obstacles = self.obstacle_detector(self.lidar_ranges)
+            print(f"{len(self.obstacles['points'])}, Nl: {len(self.obstacles['lines'][0])}, Nc: {len(self.obstacles['circles'][0])}")
+        except Exception as e:
+            rospy.logwarn(f"Obstacle extraction failed this frame: {e}")
+
+    
+    def publish_markers(self):
+        marker_array = MarkerArray()
+
+        # Unpack the data
+        Fl, Idl, BPl = self.obstacles.get('lines', ([], [], []))
+        Fc, Idc = self.obstacles.get('circles', ([], []))
+
+        marker_id = 0
+
+        # 2. CREATE LINE MARKERS
+        if BPl:
+            line_marker = Marker()
+            line_marker.header.frame_id = self.lidar_frame_id
+            line_marker.header.stamp = rospy.Time.now()
+            line_marker.ns = "extracted_lines"
+            line_marker.id = marker_id
+            line_marker.type = Marker.LINE_LIST
+            line_marker.action = Marker.ADD
+
+            line_marker.pose.orientation.w = 1.0 
+            
+            # Line thickness
+            line_marker.scale.x = 0.05 
+            
+            # Color: Green
+            line_marker.color.r = 0.0
+            line_marker.color.g = 1.0
+            line_marker.color.b = 0.0
+            line_marker.color.a = 1.0
+
+            # BPl contains lists of endpoints for each segment: [(x1,y1), (x2,y2)]
+            for segment in BPl:
+                p1, p2 = segment
+                line_marker.points.append(Point(x=p1[0], y=p1[1], z=0.0))
+                line_marker.points.append(Point(x=p2[0], y=p2[1], z=0.0))
+
+            marker_array.markers.append(line_marker)
+            marker_id += 1
+
+        # 3. CREATE CIRCLE MARKERS
+        for circle in Fc:
+            a, b, r = circle # x-center, y-center, radius
+            
+            circle_marker = Marker()
+            circle_marker.header.frame_id = self.lidar_frame_id
+            circle_marker.header.stamp = rospy.Time.now()
+            circle_marker.ns = "extracted_circles"
+            circle_marker.id = marker_id
+            circle_marker.type = Marker.CYLINDER
+            circle_marker.action = Marker.ADD
+
+            # Position
+            circle_marker.pose.position.x = a
+            circle_marker.pose.position.y = b
+            circle_marker.pose.position.z = 0.0            
+            circle_marker.pose.orientation.w = 1.0
+
+            # Scale (Cylinder diameter is 2 * radius)
+            circle_marker.scale.x = 2.0 * r
+            circle_marker.scale.y = 2.0 * r
+            circle_marker.scale.z = 0.1 # Flat disc height
+
+            # Color: Blue
+            circle_marker.color.r = 0.0
+            circle_marker.color.g = 0.5
+            circle_marker.color.b = 1.0
+            circle_marker.color.a = 0.6 # Slightly transparent
+
+            marker_array.markers.append(circle_marker)
+            marker_id += 1
+
+
+        vertices = self.voronoi.cell.poly.vertices            
+        if len(vertices) >= 3: # A polygon needs at least 3 points
+            voro_marker = Marker()
+            voro_marker.header.frame_id = self.lidar_frame_id
+            voro_marker.header.stamp = rospy.Time.now()
+            voro_marker.ns = "extracted_features"
+            voro_marker.id = marker_id
+            voro_marker.type = Marker.LINE_STRIP  # Connects points into a shape
+            voro_marker.action = Marker.ADD
+            voro_marker.pose.orientation.w = 1.0
+
+            voro_marker.scale.x = 0.05 # Thickness of the polygon boundary
+
+            # Color: Bright Magenta/Purple to stand out from obstacles
+            voro_marker.color.r = 1.0
+            voro_marker.color.g = 0.0
+            voro_marker.color.b = 1.0
+            voro_marker.color.a = 0.8 
+
+            # Add all vertices to the marker
+            for v in vertices:
+                # Safety check against inf/NaN
+                if not (math.isinf(v[0]) or math.isnan(v[0])):
+                    voro_marker.points.append(Point(x=v[0], y=v[1], z=0.0))
+
+            # Close the polygon loop by adding the first vertex at the end
+            if len(voro_marker.points) > 0:
+                first_point = voro_marker.points[0]
+                voro_marker.points.append(first_point)
+
+            marker_array.markers.append(voro_marker)
+            marker_id += 1
+
+        # Publish the array
+        self.marker_pub.publish(marker_array)
+
+    def run(self):
+        rate = rospy.Rate(10)
+        while not rospy.is_shutdown():
+
+            if self.lidar_ranges is None or self.odom_data is None:
+                rate.sleep()
+                continue
+            
+            self.voronoi.update_obstacles(self.obstacles)
+            self.voronoi()
+
+            msg = Twist()
+            msg.linear.x = 0.0
+            msg.angular.z = 0.0
+
+            self.pub.publish(msg)
+            self.publish_markers()
+            rate.sleep()
+
+if __name__ == '__main__':
+    try:
+        rospy.loginfo("====START NAVIGATION====")
+        node = NavigationNode()
+        node.run()
+    except rospy.ROSInterruptException:
+        pass

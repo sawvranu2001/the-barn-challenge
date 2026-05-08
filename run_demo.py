@@ -97,28 +97,26 @@ if __name__ == "__main__":
     ## (Customize this block to add your own navigation stack)
     ##########################################################################################
     
-    launch_file = join(base_path, '..', 'navigation_pkg/launch/launch.launch')
+    launch_file = join(base_path, '..', 'jackal_helper/launch/move_base_DWA.launch')
     nav_stack_process = subprocess.Popen([
         'roslaunch',
         launch_file,
-        f'init_position:={INIT_POSITION}',
-        f'goal_position:={GOAL_POSITION}',
     ])
     
     # Make sure your navigation stack recives the correct goal position defined in GOAL_POSITION
-    # import actionlib
-    # from geometry_msgs.msg import Quaternion
-    # from move_base_msgs.msg import MoveBaseGoal, MoveBaseAction
-    # nav_as = actionlib.SimpleActionClient('/move_base', MoveBaseAction)
-    # mb_goal = MoveBaseGoal()
-    # mb_goal.target_pose.header.frame_id = 'odom'
-    # mb_goal.target_pose.pose.position.x = GOAL_POSITION[0]
-    # mb_goal.target_pose.pose.position.y = GOAL_POSITION[1]
-    # mb_goal.target_pose.pose.position.z = 0
-    # mb_goal.target_pose.pose.orientation = Quaternion(0, 0, 0, 1)
+    import actionlib
+    from geometry_msgs.msg import Quaternion
+    from move_base_msgs.msg import MoveBaseGoal, MoveBaseAction
+    nav_as = actionlib.SimpleActionClient('/move_base', MoveBaseAction)
+    mb_goal = MoveBaseGoal()
+    mb_goal.target_pose.header.frame_id = 'odom'
+    mb_goal.target_pose.pose.position.x = GOAL_POSITION[0]
+    mb_goal.target_pose.pose.position.y = GOAL_POSITION[1]
+    mb_goal.target_pose.pose.position.z = 0
+    mb_goal.target_pose.pose.orientation = Quaternion(0, 0, 0, 1)
 
-    # nav_as.wait_for_server()
-    # nav_as.send_goal(mb_goal)
+    nav_as.wait_for_server()
+    nav_as.send_goal(mb_goal)
 
 
 
