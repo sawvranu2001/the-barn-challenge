@@ -216,6 +216,8 @@ def get_polygon_centroid_area(vertices, is_sorted=False, only_area=False):
     return centroid, area
 
 def point_segment_svc(p, segment):
+    if len(segment) == 0:
+        return np.zeros((0,2)), np.zeros((0,))
     s0, s1 = segment[:,0], segment[:,1]
     s = s1 - s0
     ds2 = np.vecdot(s, s)
@@ -230,6 +232,8 @@ def point_segment_svc(p, segment):
     return A, b
 
 def point_circle_svc(p, circle):
+    if len(circle) == 0:
+        return np.zeros((0,2)), np.zeros((0,))
     c, r = circle[:,:2], circle[:,2]
     s = c - p
     ds = np.linalg.norm(s, axis=-1)

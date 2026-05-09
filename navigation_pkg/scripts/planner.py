@@ -14,7 +14,7 @@ import math
 import numpy as np
 
 from obstacle_detector import ObstacleDetector
-from voronoi import Voronoi
+from voronoi import Voronoi, nearest_point_on_polytope, point_on_polytope_given_direction
 
 class NavigationNode:
     def __init__(self):
@@ -29,8 +29,9 @@ class NavigationNode:
         init_pos = rospy.get_param('~init_position')
         goal_pos = rospy.get_param('~goal_position')
 
-        self.init_coor = (init_pos[0], init_pos[1])
-        self.goal_coor = (init_pos[0] + goal_pos[0], init_pos[1] + goal_pos[1])
+        self.init_pos = np.array(init_pos[:2])
+        self.init_theta = init_pos[2]
+        self.goal = self.init_pos + np.array(goal_pos)
         
         # Other parameters.
         self.max_range = 4.0
@@ -46,7 +47,6 @@ class NavigationNode:
 
         self.obstacle_detector = None
         self.obstacles = None
-
         
         safety_radius = 0.3 #math.sqrt((0.420**2 + 0.310**2))/2
         self.voronoi = Voronoi(pos=np.zeros(2), safety_radius=safety_radius, xlim=[-5,5], ylim=[-5,5])
@@ -63,7 +63,7 @@ class NavigationNode:
             theta += 2*math.pi
         elif theta > math.pi:
             theta -= 2*math.pi
-        self.pos = np.array([x + self.init_coor[0], y + self.init_coor[1]])
+        self.pos = self.init_pos + np.array([x, y])
         self.theta = theta
     
     def model_callback(self, msg):
@@ -85,21 +85,103 @@ class NavigationNode:
 
         try:
             self.obstacles = self.obstacle_detector(self.lidar_ranges)
-            print(f"{len(self.obstacles['points'])}, Nl: {len(self.obstacles['lines'][0])}, Nc: {len(self.obstacles['circles'][0])}")
+            # print(f"{len(self.obstacles['points'])}, Nl: {len(self.obstacles['lines'][0])}, Nc: {len(self.obstacles['circles'][0])}")
         except Exception as e:
             rospy.logwarn(f"Obstacle extraction failed this frame: {e}")
 
-    
+    def control(self, k=0.2):
+        polytope = self.voronoi.cell.poly
+        pos, theta = np.zeros(2), 0
+        R = np.array([
+            [math.cos(self.theta), math.sin(self.theta)],
+            [-math.sin(self.theta), math.cos(self.theta)]
+        ])
+        self.rel_goal = R @ (self.goal - self.pos)
+        
+        g_dir = self.rel_goal - pos
+        h_dir = np.array([math.cos(theta), math.sin(theta)])
+        self._g = nearest_point_on_polytope(self.rel_goal, polytope, pos)
+        self._gw = point_on_polytope_given_direction(pos, g_dir, polytope)
+        self._gv = point_on_polytope_given_direction(pos, h_dir, polytope)
+        
+        hp_dir = np.array([-math.sin(theta), math.cos(theta)])
+        q = pos - (self._g + self._gw)/2
+        velocity = -k * h_dir @ (pos - self._gv)
+        omega = k * math.atan((hp_dir @ q)/(h_dir @ q))
+        # print(f'v:{velocity}, w:{omega}')
+        return velocity, omega
+
     def publish_markers(self):
         marker_array = MarkerArray()
-
-        # Unpack the data
-        Fl, Idl, BPl = self.obstacles.get('lines', ([], [], []))
-        Fc, Idc = self.obstacles.get('circles', ([], []))
-
         marker_id = 0
 
-        # 2. CREATE LINE MARKERS
+        vertices = self.voronoi.cell.poly.vertices            
+        if len(vertices) >= 3: # A polygon needs at least 3 points
+            voro_marker = Marker()
+            voro_marker.header.frame_id = self.lidar_frame_id
+            voro_marker.header.stamp = rospy.Time.now()
+            voro_marker.ns = "extracted_polytope"
+            voro_marker.id = marker_id
+            voro_marker.type = Marker.LINE_STRIP  # Connects points into a shape
+            voro_marker.action = Marker.ADD
+            voro_marker.pose.orientation.w = 1.0
+
+            voro_marker.scale.x = 0.05 # Thickness of the polygon boundary
+
+            # Color: Bright Magenta/Purple to stand out from obstacles
+            voro_marker.color.r = 1.0
+            voro_marker.color.g = 0.0
+            voro_marker.color.b = 1.0
+            voro_marker.color.a = 0.8 
+
+            # Add all vertices to the marker
+            for v in vertices:
+                # Safety check against inf/NaN
+                if not (math.isinf(v[0]) or math.isnan(v[0])):
+                    voro_marker.points.append(Point(x=v[0], y=v[1], z=0.0))
+
+            # Close the polygon loop by adding the first vertex at the end
+            if len(voro_marker.points) > 0:
+                first_point = voro_marker.points[0]
+                voro_marker.points.append(first_point)
+
+            marker_array.markers.append(voro_marker)
+            marker_id += 1
+        
+        points = [self.rel_goal, self._g, self._gw, self._gv]
+        if len(points) > 0:
+            pts_marker = Marker()
+            pts_marker.header.frame_id = self.lidar_frame_id
+            pts_marker.header.stamp = rospy.Time.now()
+            pts_marker.ns = "extracted_g" 
+            pts_marker.id = marker_id
+            pts_marker.type = Marker.SPHERE_LIST
+            pts_marker.action = Marker.ADD
+            pts_marker.pose.orientation.w = 1.0
+
+            # Scale sets the diameter of the spheres in meters
+            pts_marker.scale.x = 0.15 
+            pts_marker.scale.y = 0.15
+            pts_marker.scale.z = 0.15
+
+            # Color: Bright Yellow / Gold
+            pts_marker.color.r = 1.0
+            pts_marker.color.g = 0.8
+            pts_marker.color.b = 0.0
+            pts_marker.color.a = 1.0 
+
+            # Add all 4 points to the marker
+            for pt in points:
+                # Safety check against inf/NaN
+                if not (math.isinf(pt[0]) or math.isnan(pt[0])):
+                    pts_marker.points.append(Point(x=pt[0], y=pt[1], z=0.0))
+
+            marker_array.markers.append(pts_marker)
+            marker_id += 1
+
+        
+        Fl, Idl, BPl = self.obstacles.get('lines', ([], [], []))
+        Fc, Idc = self.obstacles.get('circles', ([], []))
         if BPl:
             line_marker = Marker()
             line_marker.header.frame_id = self.lidar_frame_id
@@ -161,40 +243,6 @@ class NavigationNode:
             marker_array.markers.append(circle_marker)
             marker_id += 1
 
-
-        vertices = self.voronoi.cell.poly.vertices            
-        if len(vertices) >= 3: # A polygon needs at least 3 points
-            voro_marker = Marker()
-            voro_marker.header.frame_id = self.lidar_frame_id
-            voro_marker.header.stamp = rospy.Time.now()
-            voro_marker.ns = "extracted_features"
-            voro_marker.id = marker_id
-            voro_marker.type = Marker.LINE_STRIP  # Connects points into a shape
-            voro_marker.action = Marker.ADD
-            voro_marker.pose.orientation.w = 1.0
-
-            voro_marker.scale.x = 0.05 # Thickness of the polygon boundary
-
-            # Color: Bright Magenta/Purple to stand out from obstacles
-            voro_marker.color.r = 1.0
-            voro_marker.color.g = 0.0
-            voro_marker.color.b = 1.0
-            voro_marker.color.a = 0.8 
-
-            # Add all vertices to the marker
-            for v in vertices:
-                # Safety check against inf/NaN
-                if not (math.isinf(v[0]) or math.isnan(v[0])):
-                    voro_marker.points.append(Point(x=v[0], y=v[1], z=0.0))
-
-            # Close the polygon loop by adding the first vertex at the end
-            if len(voro_marker.points) > 0:
-                first_point = voro_marker.points[0]
-                voro_marker.points.append(first_point)
-
-            marker_array.markers.append(voro_marker)
-            marker_id += 1
-
         # Publish the array
         self.marker_pub.publish(marker_array)
 
@@ -209,9 +257,11 @@ class NavigationNode:
             self.voronoi.update_obstacles(self.obstacles)
             self.voronoi()
 
+            velocity, omega = self.control()
+            
             msg = Twist()
-            msg.linear.x = 0.1
-            msg.angular.z = 0.1
+            msg.linear.x = velocity
+            msg.angular.z = omega
 
             self.pub.publish(msg)
             self.publish_markers()
