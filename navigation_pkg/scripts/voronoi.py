@@ -35,10 +35,9 @@ class Voronoi:
         self.cell = Cell(pos, safety_radius)
         self.obstacles = None
     
-    def update_obstacles(self, obstacles):
+    def __call__(self, obstacles):
         self.obstacles = Obstacle(**obstacles)
-    
-    def __call__(self):
+
         Ab, bb, idx = self.boundary()
         Al, bl = point_segment_svc(self.cell.pos, self.obstacles.segments)
         Ac, bc = point_circle_svc(self.cell.pos, self.obstacles.circles)
@@ -236,7 +235,7 @@ def point_circle_svc(p, circle):
         return np.zeros((0,2)), np.zeros((0,))
     c, r = circle[:,:2], circle[:,2]
     s = c - p
-    ds = np.linalg.norm(s, axis=-1)
+    ds = np.hypot(s[:,0], s[:,1])
     t = (ds - r)
     q = p +  (t/ds)[:,None] * s
 

@@ -15,6 +15,7 @@ import numpy as np
 
 from obstacle_detector import ObstacleDetector
 from voronoi import Voronoi, nearest_point_on_polytope, point_on_polytope_given_direction
+from global_planner import GlobalPlanner
 
 class NavigationNode:
     def __init__(self):
@@ -50,6 +51,7 @@ class NavigationNode:
         
         safety_radius = 0.3 #math.sqrt((0.420**2 + 0.310**2))/2
         self.voronoi = Voronoi(pos=np.zeros(2), safety_radius=safety_radius, xlim=[-5,5], ylim=[-5,5])
+        self.global_planner = GlobalPlanner(r_safe=safety_radius+0.1)
     
     def odom_callback(self, msg):
         self.odom_data = msg
@@ -89,7 +91,7 @@ class NavigationNode:
         except Exception as e:
             rospy.logwarn(f"Obstacle extraction failed this frame: {e}")
 
-    def control(self, k=0.2):
+    def control(self, k=0.5):
         polytope = self.voronoi.cell.poly
         pos, theta = np.zeros(2), 0
         R = np.array([
@@ -97,10 +99,12 @@ class NavigationNode:
             [-math.sin(self.theta), math.cos(self.theta)]
         ])
         self.rel_goal = R @ (self.goal - self.pos)
-        
-        g_dir = self.rel_goal - pos
+        path = self.global_planner((0, 0), (self.rel_goal[0], self.rel_goal[1]), self.obstacles)
+        self.curr_goal = np.array(path[1])
+
+        g_dir = self.curr_goal - pos
         h_dir = np.array([math.cos(theta), math.sin(theta)])
-        self._g = nearest_point_on_polytope(self.rel_goal, polytope, pos)
+        self._g = nearest_point_on_polytope(self.curr_goal, polytope, pos)
         self._gw = point_on_polytope_given_direction(pos, g_dir, polytope)
         self._gv = point_on_polytope_given_direction(pos, h_dir, polytope)
         
@@ -148,7 +152,7 @@ class NavigationNode:
             marker_array.markers.append(voro_marker)
             marker_id += 1
         
-        points = [self.rel_goal, self._g, self._gw, self._gv]
+        points = [self.rel_goal, self.curr_goal, self._g, self._gw, self._gv]
         if len(points) > 0:
             pts_marker = Marker()
             pts_marker.header.frame_id = self.lidar_frame_id
@@ -254,8 +258,7 @@ class NavigationNode:
                 rate.sleep()
                 continue
             
-            self.voronoi.update_obstacles(self.obstacles)
-            self.voronoi()
+            self.voronoi(self.obstacles)
 
             velocity, omega = self.control()
             

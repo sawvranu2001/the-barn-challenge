@@ -108,14 +108,12 @@ class ObstacleDetector:
         # print((i,j), Fc[2])
         flag = Fc[-1] < self.r_max
         if flag:
-            for k in range(i, j):
-                pk = points[k]
-                d1 = line_prep_dist(Fl, pk)
-                d2 = circle_prep_dist(Fc, pk)
-                if d2 > self.eps_c or d2 > d1:
-                    flag = False
-                    break
-        # print((i,j), k, d1, d2)
+            n = (j-i)
+            dl = sum([line_prep_dist(Fl, points[k]) for k in range(i, j)]) / n
+            dc = sum([circle_prep_dist(Fc, points[k]) for k in range(i, j)]) / n
+            if dc > self.eps_c or dc > dl:
+                flag = False
+            # print((i,j), dl, dc)
         if not flag:
             Fc = None
         return flag, Fc
