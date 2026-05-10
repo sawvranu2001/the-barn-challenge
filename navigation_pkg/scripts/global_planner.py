@@ -46,6 +46,7 @@ class GlobalPlanner:
             closed_list.add(self._pos_key(current.pos))
 
             if self._pos_key(current.pos) == tgt_key or current.depth > self.max_depth:
+                # print(f'{current.pos}, {current.depth}, {len(obstacles)}')
                 path = []
                 while current:
                     path.append(current.pos)

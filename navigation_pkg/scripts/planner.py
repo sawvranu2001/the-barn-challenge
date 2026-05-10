@@ -12,6 +12,7 @@ from geometry_msgs.msg import Point
 
 import math
 import numpy as np
+import time
 
 from obstacle_detector import ObstacleDetector
 from voronoi import Voronoi, nearest_point_on_polytope, point_on_polytope_given_direction
@@ -91,7 +92,7 @@ class NavigationNode:
         except Exception as e:
             rospy.logwarn(f"Obstacle extraction failed this frame: {e}")
 
-    def control(self, k=0.5):
+    def control(self, k=1.0):
         polytope = self.voronoi.cell.poly
         pos, theta = np.zeros(2), 0
         R = np.array([
@@ -99,8 +100,11 @@ class NavigationNode:
             [-math.sin(self.theta), math.cos(self.theta)]
         ])
         self.rel_goal = R @ (self.goal - self.pos)
-        path = self.global_planner((0, 0), (self.rel_goal[0], self.rel_goal[1]), self.obstacles)
-        self.curr_goal = np.array(path[1])
+
+        # st = time.time()
+        path = self.global_planner((0.0, 0.0), self.rel_goal.tolist(), self.obstacles)
+        # print('gb', time.time() - st, path is None)
+        self.curr_goal = np.array(path[1]) if path is not None else self.rel_goal
 
         g_dir = self.curr_goal - pos
         h_dir = np.array([math.cos(theta), math.sin(theta)])
@@ -152,7 +156,7 @@ class NavigationNode:
             marker_array.markers.append(voro_marker)
             marker_id += 1
         
-        points = [self.rel_goal, self.curr_goal, self._g, self._gw, self._gv]
+        points = [self.rel_goal, self.curr_goal]#, self._g, self._gw, self._gv]
         if len(points) > 0:
             pts_marker = Marker()
             pts_marker.header.frame_id = self.lidar_frame_id

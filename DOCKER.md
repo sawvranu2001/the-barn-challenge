@@ -1,8 +1,8 @@
 ```
 docker compose up -d --build
 docker exec -it the-barn-challenge bash
-catkin_make
-python src/the-barn-challenge/y --gui --world_idx 108
+catkin_make && cd src/the-barn-challenge/
+python run.py --gui --world_idx 108
 rviz -d src/the-barn-challenge/jackal_nav.rviz 
 ./test.sh
 ./test_dynamic.sh
