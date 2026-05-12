@@ -19,7 +19,7 @@ class Node:
 
 
 class GlobalPlanner:
-    def __init__(self, r_safe=0.1, wg=1.0, wh=1.0, max_depth=float('inf')):
+    def __init__(self, r_safe=0.1,  wg=1.0, wh=1.0, max_depth=float('inf')):
         self.r_safe = r_safe
         self.wg = wg
         self.wh = wh
@@ -29,9 +29,7 @@ class GlobalPlanner:
         # Extract lines and circles based on input structure
         Fl, Idl, BPl = obstacles.get('lines', ([], [], []))
         Fc, Idc = obstacles.get('circles', ([], []))
-
-        # Combine base primitives
-        all_obstacles = BPl + Fc
+        self._all_obstacles = BPl + Fc
 
         tgt_key = self._pos_key(target)
 
@@ -43,220 +41,230 @@ class GlobalPlanner:
 
         while open_list:
             current = heapq.heappop(open_list)
+            # print(f'{current.pos}, {current.depth}')
             closed_list.add(self._pos_key(current.pos))
 
             if self._pos_key(current.pos) == tgt_key or current.depth > self.max_depth:
-                # print(f'{current.pos}, {current.depth}, {len(obstacles)}')
                 path = []
                 while current:
                     path.append(current.pos)
                     current = current.parent
                 return path[::-1] # Reverse to get Start -> Target
 
-            neighbours = self._compute_neighbours(current.pos, target, all_obstacles)
+            waypoints = self._generate_waypoints(current.pos, target)
 
-            for pos_n in neighbours:
-                if self._pos_key(pos_n) in closed_list:
+            for w_pos in waypoints:
+                if self._pos_key(w_pos) in closed_list:
                     continue
 
-                hcost = distance(pos_n, target) * self.wh
-                gcost = distance(current.pos, pos_n) * self.wg + current.gcost
+                hcost = self.wh * distance(w_pos, target)
+                gcost = self.wg * distance(current.pos, w_pos) + current.gcost
                 depth = current.depth + 1
-                next_node = Node(pos=pos_n, hcost=hcost, gcost=gcost, parent=current, depth=depth)
+                next_node = Node(pos=w_pos, hcost=hcost, gcost=gcost, parent=current, depth=depth)
                 heapq.heappush(open_list, next_node)
+        return None 
 
-        return None
-
-    def _compute_neighbours(self, src, tgt, obstacles):
-        if self._is_segment_clear(src, tgt, obstacles):
-            return [tgt]
-
-        No = len(obstacles)
-        S_Ft = []
-        for i in range(No):
-            O = obstacles[i]
-            if len(O) == 3:
-                Ft = circle_tangent(src, O, self.r_safe)
+    def _generate_waypoints(self, src, tgt):
+        waypoints = []
+        to_explore = [tgt]
+        explored = set() 
+        while to_explore:
+            next_pt = to_explore.pop(0)
+            # print(next_pt, end=': ')
+            explored.add(self._pos_key(next_pt))
+            no_ids = self._intersected_obstacles(src, next_pt, self._all_obstacles, True)
+            # waypoints.append(next_pt)
+            if not no_ids:
+                # print("no intersection")
+                waypoints.append(next_pt)
             else:
-                Ft = segment_tangent(src, O, self.r_safe)
-            S_Ft.append(Ft)
+                obs_f = self._all_obstacles[no_ids[0][1]]
+                wp = self._compute_waypoints(src, obs_f)
+                # print(f"o:{no_ids[0][1]}, {wp}")
+                for q in wp:
+                    if self._pos_key(q) not in explored:
+                        to_explore.append(q)
+        # print(len(explored))
+        return waypoints    
+    
+    def postprocess(self, src, tgt):
+        v0 = (tgt[0] - src[0], tgt[1] - src[1])
+        d0 = math.hypot(*v0)
 
-        neighbors = []
-        for i, s_Ft in enumerate(S_Ft):
-            Oi = obstacles[i]
-            if len(Oi) == 3:
-                t_Ft = circle_tangent(tgt, Oi, self.r_safe)
-            else:
-                t_Ft = segment_tangent(tgt, Oi, self.r_safe)
-            
-            # print(f'\nobs:{i}')
-            for k1, F1 in enumerate(s_Ft):
-                t_max = 0
-                w_pt = None
-                for k2, F2 in enumerate(t_Ft):
-                    pt = line_intersect(F1, F2)
-                    if pt is not None:
-                        t = valid_intersect(src, tgt, pt)
-                        # print(f"t:{(k1, k2)}: {t:.4f}")
-                        if (0 < t <= 1) and (t > t_max):
-                            t_max = t
-                            w_pt = pt
-                # print(f"t:{k1}: {t_max:.4f} {w_pt}", end=' ')
-                if (w_pt is not None and 
-                    self._is_segment_clear(src, w_pt, obstacles, exclude=i)
-                    ):
-                        # print(f"intersect")
-                        neighbors.append(w_pt)
-        return neighbors
+        tgt_n = tgt
+        si_max = 0
+        for obs in self._all_obstacles:
+            wp = self._compute_waypoints(tgt, obs)
+            for q in wp:
+                vq = (q[0] - tgt[0], q[1] - tgt[1])
+                dq = math.hypot(*vq)
+                si = 1 - (v0[0]*vq[0] + v0[1]*vq[1]) / (d0*dq)
+                if si < 0.5:
+                    o_ids = self._intersected_obstacles(tgt, q, self._all_obstacles)
+                    if not o_ids and si > si_max:
+                        si_max = si
+                        tgt_n = q
+        return tgt_n
+    
+    def _compute_waypoints(self, src, obs):
+        if self._is_circle(obs):
+            wp = circle_waypoints(src, obs, self.r_safe)
+        else:
+            wp = box_waypoints(src, obs, self.r_safe)
+        return wp
 
-    def _is_segment_clear(self, src, tgt, obstacles, exclude=None):
+    def _intersected_obstacles(self, src, tgt, obstacles, get_all=False):
+        ids = []
         for i, O in enumerate(obstacles):
-            if exclude is not None and i == exclude:
-                continue
-
-            if len(O) == 3:
-                flag = segment_circle_collision(src, tgt, O, self.r_safe)
+            if self._is_circle(O):
+                is_col, t = segment_circle_collision(src, tgt, O, self.r_safe)
             else:
-                flag = segment_segment_collision(src, tgt, O, self.r_safe)
+                is_col, t = segment_box_collision(src, tgt, O, self.r_safe)
             # print(f"oi:{i}, {flag}, {src}, {tgt}, {O}")
-            if flag:
-                return False
-        return True
+            if is_col and t > 0:
+                ids.append((t, i))
+                if not get_all: return ids
+        ids.sort()
+        return ids
+    
+
+    def _is_circle(self, O):
+        return len(O) == 3
 
     def _pos_key(self, pos, eps=1e-3):
         return (round(pos[0] / eps), round(pos[1] / eps))
 
-def valid_intersect(src, tgt, intersect):
-    v_st = (tgt[0] - src[0], tgt[1] - src[1])
-    v_si = (intersect[0] - src[0], intersect[1] - src[1])
-    dot = v_st[0]*v_si[0] + v_st[1]*v_si[1]
-    d_sq = v_st[0]**2 + v_st[1]**2
-    t = dot / d_sq 
-    # print(t, dot, 0 < t <= 1, dot > 0)
-    return t #0 < t <= 1 #dot > 0
+def segment_box_collision(p0, p1, segment, r_safe, eps=1e-8):
+    (x0, y0), (x1, y1) = segment
 
-def line_intersect(F1, F2):
-    a1, b1, c1 = F1
-    a2, b2, c2 = F2
-    det = a1*b2 - a2*b1
+    xm = (x0 + x1) * 0.5
+    ym = (y0 + y1) * 0.5
+    dxs, dys = x1 - x0, y1 - y0
+    L = math.hypot(dxs, dys)
 
-    if abs(det) < 1e-8:
-        return None
-
-    x = (b1*c2 - b2*c1) / det
-    y = (a2*c1 - a1*c2) / det
-    return (x, y)
-
-def segment_segment_collision(p0, p1, segment, r_safe, eps=1e-6):
-    (cx0, cy0), (cx1, cy1) = segment
-    R = max(r_safe, eps)
-
-    dx, dy = p1[0] - p0[0], p1[1] - p0[1]
-    dcx, dcy = cx1 - cx0, cy1 - cy0
-    rx, ry = p0[0] - cx0, p0[1] - cy0
-    
-    a = dx**2 + dy**2
-    e = dcx**2 + dcy**2
-    f = dcx*rx + dcy*ry
-
-    if a <= eps and e <= eps: 
-        s, t = 0.0, 0.0
-    elif a<=eps:
-        s = 0.0
-        t = max(0.0, min(1.0, f/e))
-    
+    if L == 0:
+        u0 = (1.0, 0.0)
     else:
-        c = dx*rx + dy*ry
-        if e <= eps:
-            t = 0.0
-            s = max(0.0, min(1.0, -c/a))
+        u0 = (dxs/L, dys/L)
+    u1 = (-u0[1], u0[0])
+    e = (0.5*L + r_safe - eps, r_safe-eps)
+
+    dp = p1[0] - p0[0], p1[1] - p0[1]
+    # d = math.hypot(dp[0], dp[1])
+    # dp = (dp[0]/d, dp[1]/d)
+    pl = ((p0[0] - xm)*u0[0] + (p0[1] - ym)*u0[1], 
+          (p0[0] - xm)*u1[0] + (p0[1] - ym)*u1[1])
+
+    dpl = (dp[0]*u0[0] + dp[1]*u0[1], 
+           dp[0]*u1[0] + dp[1]*u1[1])
+
+    t_min = 0.0
+    t_max = 1
+    for i in range(2):
+        if abs(dpl[i]) < 1e-8:
+            if pl[i] < -e[i] or pl[i] > e[i]: return False, 0
         else:
-            b = dx*dcx + dy*dcy
-            denom = a*e - b**2
-            if denom != 0:
-                s = max(0.0, min(1.0, (b*f - c*e)/denom))
-            else:
-                s = 0
-            t = (b*s + f)/e
-            if t < 0:
-                t = 0.0
-                s = max(0.0, min(1.0, -c/a))
-            elif t > 1:
-                t = 1.0
-                s = max(0.0, min(1.0, (b - c)/a))
-            
-    c1 = (p0[0] + dx*s, p0[1] + dy*s)
-    c2 = (cx0 + dcx*t, cy0 + dcy*t)
+            ood = 1.0 / dpl[i]
+            t1 = (-e[i] - pl[i]) * ood
+            t2 = ( e[i] - pl[i]) * ood
+            if t1 > t2: t1, t2 = t2, t1            
+            t_min = max(t_min, t1)
+            t_max = min(t_max, t2)
+            if t_min > t_max: return False, 0
+    return True, t_min
 
-    dc = (c1[0] - c2[0])**2 + (c1[1] - c2[1])**2
-    return dc < R**2
 
-def segment_tangent(p, segment, r_safe, eps=1e-6):
-    (cx0, cy0), (cx1, cy1) = segment
+def box_waypoints(p, segment, r_safe, eps=1e-6):
+    (x0, y0), (x1, y1) = segment
+    r_safe = max(r_safe, eps)
 
-    all_Ft = []
-    all_Ft.extend(circle_tangent(p, (cx0, cy0, eps), r_safe))
-    all_Ft.extend(circle_tangent(p, (cx1, cy1, eps), r_safe))
-    if len(all_Ft) < 4: return []
+    dx = x1 - x0
+    dy = y1 - y0
+    L = math.hypot(dx, dy)
     
-    Ft = []
+    ux, uy = (dx/L)*r_safe, (dy/L)*r_safe
+    vx, vy = -uy, ux
+    all_wp = [
+        (x0 - ux + vx, y0 - uy + vy), 
+        (x0 - ux - vx, y0 - uy - vy),
+        (x1 + ux - vx, y1 + uy - vy), 
+        (x1 + ux + vx, y1 + uy + vy)
+    ]
+    # return all_wp
+    all_dwp = [(wp[0] - p[0], wp[1] - p[1]) for wp in all_wp]
+    wp = []
     for i in range(4):
-        a1, b1, c1 = all_Ft[i]
+        dx1, dy1 = all_dwp[i]
+        d = math.hypot(dx1, dy1)
+        # print('d', d, d < 1e-8)
+        if d < eps:
+            # print((i-1)%4, (i+1)%4)
+            wp.append(all_wp[(i-1)%4])
+            wp.append(all_wp[(i+1)%4])
+            return wp
+    
+    for i in range(4):
+        dx1, dy1 = all_dwp[i]
         n = 0
         for j in range(4):
             if i == j: continue
-            a2, b2, c2 = all_Ft[j]
-            cross = a1*b2 - b1*a2
-            if cross > 0:
+            dx2, dy2 = all_dwp[j]
+            cross = dx1*dy2 - dx2*dy1
+            if cross >= 0:
                 n += 1
         if n == 0 or n == 3:
-            Ft.append((a1, b1, c1))
-    return Ft
+            wp.append(all_wp[i])
+        if len(wp) == 2:
+            break
+    return wp
 
-def segment_circle_collision(p0, p1, circle, r_safe):
-    xc, yc, r = circle
+
+def segment_circle_collision(p0, p1, circle, r_safe=0, eps=1e-8):
+    cx, cy, r = circle
     x0, y0 = p0[0], p0[1]
     x1, y1 = p1[0], p1[1]
-    R = r + r_safe
+    R = r + r_safe - eps
 
-    dxc0 = xc - x0
-    dyc0 = yc - y0
-    dx = x1 - x0
-    dy = y1 - y0
-    d_sq = dx**2 + dy**2
-
-    if d_sq == 0:
-        return dxc0**2+ dyc0**2 < R**2
-
-    t = (dxc0*dx + dyc0*dy)/d_sq
-    t = max(0.0, min(1.0, t))
-    
-    xp = x0 + t * dx
-    yp = y0 + t * dy
-    dr = (xp - xc)**2 + (yp - yc)**2
-    return dr < R**2
-
-def circle_tangent(p, circle, r_safe):
-    c, r = circle[:2], circle[2]
-    R = r + r_safe
-
-    dx = c[0] - p[0]
-    dy = c[1] - p[1]
+    mx, my = x0 - cx, y0 - cy
+    dx, dy = x1 - x0, y1 - y0
     d = math.hypot(dx, dy)
-    if d <= R: return []
+    dx /= d
+    dy /= d
     
-    sth = min(R/d, 1.0)
+    b = mx*dx + my*dy
+    c = mx**2 + my**2 - R**2
+    if c > 0 and b > 0: return False, 0
+    
+    discr = b**2 - c
+    if discr < 0: return False, 0
+    
+    t = max(-b - math.sqrt(discr), 0)
+    return t <= d, min(t, d)/d
+
+def circle_waypoints(p, circle, r_safe, dv=0.1):
+    c, r = circle[:2], circle[2]
+    r = r + r_safe
+    
+    dx, dy = c[0] - p[0], c[1] - p[1]
+    d = math.hypot(dx, dy)
+    if d < r: return []
+
+    sth = min(r/d, 1.0)
     cth = math.sqrt(1 - sth**2)
 
     dx /= d
     dy /= d
-    t1 = (cth*dx + sth*dy, -sth*dx + cth*dy)
-    t2 = (cth*dx - sth*dy, sth*dx + cth*dy)
+    dt1 = (cth*dx + sth*dy, -sth*dx + cth*dy)
+    dt2 = (cth*dx - sth*dy, sth*dx + cth*dy)
 
-    Ft1 = (-t1[1], t1[0], t1[1]*p[0] - t1[0]*p[1])
-    Ft2 = (-t2[1], t2[0], t2[1]*p[0] - t2[0]*p[1])
-    
-    return Ft1, Ft2
+    R = r*(1 + dv)
+    b = -d*cth
+    c = d**2- R**2
+    discr = b**2 - c
+    h = -b + math.sqrt(discr)
+    wp1 = (p[0] + h*dt1[0], p[1] + h*dt1[1])
+    wp2 = (p[0] + h*dt2[0], p[1] + h*dt2[1])
+    return wp1, wp2
 
 def distance(p0, p1):
     return math.hypot(p1[0] - p0[0], p1[1] - p0[1])

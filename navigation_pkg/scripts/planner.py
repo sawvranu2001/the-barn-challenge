@@ -13,6 +13,7 @@ from geometry_msgs.msg import Point
 import math
 import numpy as np
 import time
+import json
 
 from obstacle_detector import ObstacleDetector
 from voronoi import Voronoi, nearest_point_on_polytope, point_on_polytope_given_direction
@@ -50,9 +51,14 @@ class NavigationNode:
         self.obstacle_detector = None
         self.obstacles = None
         
-        safety_radius = 0.3 #math.sqrt((0.420**2 + 0.310**2))/2
-        self.voronoi = Voronoi(pos=np.zeros(2), safety_radius=safety_radius, xlim=[-5,5], ylim=[-5,5])
-        self.global_planner = GlobalPlanner(r_safe=safety_radius+0.1)
+        # safety_radius = 0.2 #math.sqrt((0.420**2 + 0.310**2))/2
+        self.voronoi = Voronoi(
+            pos=np.zeros(2), 
+            safety_radius=0.2, 
+            xlim=[-5,5], ylim=[-5,5]
+        )
+        self.global_planner = GlobalPlanner(r_safe=0.25)
+        self.control_gain = 2.5 #[1.5, 2.5]
     
     def odom_callback(self, msg):
         self.odom_data = msg
@@ -92,31 +98,48 @@ class NavigationNode:
         except Exception as e:
             rospy.logwarn(f"Obstacle extraction failed this frame: {e}")
 
-    def control(self, k=1.0):
+    def control(self):
         polytope = self.voronoi.cell.poly
-        pos, theta = np.zeros(2), 0
+        
         R = np.array([
             [math.cos(self.theta), math.sin(self.theta)],
             [-math.sin(self.theta), math.cos(self.theta)]
         ])
         self.rel_goal = R @ (self.goal - self.pos)
 
-        # st = time.time()
-        path = self.global_planner((0.0, 0.0), self.rel_goal.tolist(), self.obstacles)
-        # print('gb', time.time() - st, path is None)
-        self.curr_goal = np.array(path[1]) if path is not None else self.rel_goal
+        path = self.global_planner((0.0, 0.0), self.rel_goal, self.obstacles)
+        if not path:
+            self.curr_goal = self.rel_goal
+        else:
+            self.curr_goal = self.global_planner.postprocess(path[0], path[1])
+        self.curr_goal = np.array(self.curr_goal)
 
+        # data = {
+        #     "pos": self.pos.tolist(), "rotm":R.tolist(), 'theta':theta,
+        #     "goal": self.rel_goal.tolist(),
+        #     "obstacles":self.obstacles,
+        #     "ranges": self.lidar_ranges
+        # }
+        # with open('/home/ubuntu/jackal_ws/src/the-barn-challenge/data.jsonl', 'a') as f:
+        #     json.dump(data, f, separators=(',', ':'))
+        #     f.write('\n')
+
+        pos, theta = np.zeros(2), 0
         g_dir = self.curr_goal - pos
         h_dir = np.array([math.cos(theta), math.sin(theta)])
+        hp_dir = np.array([-math.sin(theta), math.cos(theta)])
+
         self._g = nearest_point_on_polytope(self.curr_goal, polytope, pos)
         self._gw = point_on_polytope_given_direction(pos, g_dir, polytope)
         self._gv = point_on_polytope_given_direction(pos, h_dir, polytope)
         
-        hp_dir = np.array([-math.sin(theta), math.cos(theta)])
-        q = pos - (self._g + self._gw)/2
-        velocity = -k * h_dir @ (pos - self._gv)
-        omega = k * math.atan((hp_dir @ q)/(h_dir @ q))
-        # print(f'v:{velocity}, w:{omega}')
+        q = (self._g + self._gw)/2 - pos
+        velocity = self.control_gain * h_dir @ (self._gv - pos)
+        omega = self.control_gain * math.atan2((hp_dir @ q), (h_dir @ q))
+        
+        max_vel = 1.0 if len(path) > 2 else np.inf
+        velocity = max(min(velocity, max_vel), -max_vel)
+        print(f'v:{velocity}, w:{omega}')
         return velocity, omega
 
     def publish_markers(self):
@@ -156,7 +179,7 @@ class NavigationNode:
             marker_array.markers.append(voro_marker)
             marker_id += 1
         
-        points = [self.rel_goal, self.curr_goal]#, self._g, self._gw, self._gv]
+        points = [self.rel_goal, self.curr_goal, self._g, self._gw, self._gv]
         if len(points) > 0:
             pts_marker = Marker()
             pts_marker.header.frame_id = self.lidar_frame_id
