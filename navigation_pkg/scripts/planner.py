@@ -57,8 +57,8 @@ class NavigationNode:
             safety_radius=0.2, 
             xlim=[-5,5], ylim=[-5,5]
         )
-        self.global_planner = GlobalPlanner(r_safe=0.25)
-        self.control_gain = 2.5 #[1.5, 2.5]
+        self.global_planner = GlobalPlanner(r_safe=0.25, r_vir=0.0)
+        self.control_gain = 2.5
     
     def odom_callback(self, msg):
         self.odom_data = msg
@@ -111,11 +111,12 @@ class NavigationNode:
         if not path:
             self.curr_goal = self.rel_goal
         else:
-            self.curr_goal = self.global_planner.postprocess(path[0], path[1])
+            self.curr_goal = path[1] 
+            #self.global_planner.postprocess(path[0], path[1])
         self.curr_goal = np.array(self.curr_goal)
 
         # data = {
-        #     "pos": self.pos.tolist(), "rotm":R.tolist(), 'theta':theta,
+        #     "pos": self.pos.tolist(), "rotm":R.tolist(), 'theta':0,
         #     "goal": self.rel_goal.tolist(),
         #     "obstacles":self.obstacles,
         #     "ranges": self.lidar_ranges
@@ -137,9 +138,13 @@ class NavigationNode:
         velocity = self.control_gain * h_dir @ (self._gv - pos)
         omega = self.control_gain * math.atan2((hp_dir @ q), (h_dir @ q))
         
-        max_vel = 1.0 if len(path) > 2 else np.inf
+        if np.linalg.norm(self.rel_goal) > 3 or len(path) > 2:
+            max_vel = 1.0  
+        else:
+            max_vel = np.inf 
+        #1.0 if len(path) > 2 else np.inf
         velocity = max(min(velocity, max_vel), -max_vel)
-        print(f'v:{velocity}, w:{omega}')
+        # print(f'v:{velocity}, w:{omega}, d:{np.linalg.norm(self.rel_goal)}')
         return velocity, omega
 
     def publish_markers(self):

@@ -19,8 +19,9 @@ class Node:
 
 
 class GlobalPlanner:
-    def __init__(self, r_safe=0.1,  wg=1.0, wh=1.0, max_depth=float('inf')):
+    def __init__(self, r_safe=0.1, r_vir=0.0, wg=1.0, wh=1.0, max_depth=float('inf')):
         self.r_safe = r_safe
+        self.r_vir = r_vir
         self.wg = wg
         self.wh = wh
         self.max_depth = max_depth
@@ -87,30 +88,11 @@ class GlobalPlanner:
         # print(len(explored))
         return waypoints    
     
-    def postprocess(self, src, tgt):
-        v0 = (tgt[0] - src[0], tgt[1] - src[1])
-        d0 = math.hypot(*v0)
-
-        tgt_n = tgt
-        si_max = 0
-        for obs in self._all_obstacles:
-            wp = self._compute_waypoints(tgt, obs)
-            for q in wp:
-                vq = (q[0] - tgt[0], q[1] - tgt[1])
-                dq = math.hypot(*vq)
-                si = 1 - (v0[0]*vq[0] + v0[1]*vq[1]) / (d0*dq)
-                if si < 0.5:
-                    o_ids = self._intersected_obstacles(tgt, q, self._all_obstacles)
-                    if not o_ids and si > si_max:
-                        si_max = si
-                        tgt_n = q
-        return tgt_n
-    
     def _compute_waypoints(self, src, obs):
         if self._is_circle(obs):
-            wp = circle_waypoints(src, obs, self.r_safe)
+            wp = circle_waypoints(src, obs, self.r_safe, self.r_vir)
         else:
-            wp = box_waypoints(src, obs, self.r_safe)
+            wp = box_waypoints(src, obs, self.r_safe, self.r_vir)
         return wp
 
     def _intersected_obstacles(self, src, tgt, obstacles, get_all=False):
@@ -174,15 +156,15 @@ def segment_box_collision(p0, p1, segment, r_safe, eps=1e-8):
     return True, t_min
 
 
-def box_waypoints(p, segment, r_safe, eps=1e-6):
+def box_waypoints(p, segment, r_safe, r_vir, eps=1e-6):
     (x0, y0), (x1, y1) = segment
-    r_safe = max(r_safe, eps)
+    R = max(r_safe, eps) + r_vir
 
     dx = x1 - x0
     dy = y1 - y0
     L = math.hypot(dx, dy)
     
-    ux, uy = (dx/L)*r_safe, (dy/L)*r_safe
+    ux, uy = (dx/L)*R, (dy/L)*R
     vx, vy = -uy, ux
     all_wp = [
         (x0 - ux + vx, y0 - uy + vy), 
@@ -241,7 +223,7 @@ def segment_circle_collision(p0, p1, circle, r_safe=0, eps=1e-8):
     t = max(-b - math.sqrt(discr), 0)
     return t <= d, min(t, d)/d
 
-def circle_waypoints(p, circle, r_safe, dv=0.1):
+def circle_waypoints(p, circle, r_safe, r_vir, dv=0.1):
     c, r = circle[:2], circle[2]
     r = r + r_safe
     
@@ -257,7 +239,7 @@ def circle_waypoints(p, circle, r_safe, dv=0.1):
     dt1 = (cth*dx + sth*dy, -sth*dx + cth*dy)
     dt2 = (cth*dx - sth*dy, sth*dx + cth*dy)
 
-    R = r*(1 + dv)
+    R = r*(1 + dv) + r_vir
     b = -d*cth
     c = d**2- R**2
     discr = b**2 - c
