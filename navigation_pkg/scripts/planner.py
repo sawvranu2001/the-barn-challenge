@@ -43,6 +43,7 @@ class NavigationNode:
         self.lidar_ranges = None
         self.odom_data = None
         self.model_data = None
+        self.curr_goal = None
 
         # Others
         self.marker_pub = rospy.Publisher('/obstacle_markers', MarkerArray, queue_size=1)
@@ -57,7 +58,7 @@ class NavigationNode:
             safety_radius=0.2, 
             xlim=[-5,5], ylim=[-5,5]
         )
-        self.global_planner = GlobalPlanner(r_safe=0.25, r_vir=0.0)
+        self.global_planner = GlobalPlanner(r_safe=0.27, r_vir=0.05)
         self.control_gain = 2.5
     
     def odom_callback(self, msg):
@@ -106,45 +107,54 @@ class NavigationNode:
             [-math.sin(self.theta), math.cos(self.theta)]
         ])
         self.rel_goal = R @ (self.goal - self.pos)
+        
+        # DIST_TOLERANCE = 0.4
+        # replan = True
+        # if self.curr_goal is not None:
+        #     dist_to_goal = np.linalg.norm(self.curr_goal - self.pos)
+        #     prev_rel_goal = R @ (self.curr_goal - self.pos)
+        #     outside_poly = (polytope.A @ prev_rel_goal > polytope.b[:,None]).any()
+        #     if outside_poly and dist_to_goal > DIST_TOLERANCE:
+        #         # print('d', dist_to_goal, outside_poly)
+        #         replan = False
+        #         self.curr_rel_goal = prev_rel_goal
 
+        # if replan:
+        #     # print('replan')
         path = self.global_planner((0.0, 0.0), self.rel_goal, self.obstacles)
         if not path:
-            self.curr_goal = self.rel_goal
+            self.curr_rel_goal = self.rel_goal
+            rospy.logwarn(f"Path generation failed")
         else:
-            self.curr_goal = path[1] 
-            #self.global_planner.postprocess(path[0], path[1])
-        self.curr_goal = np.array(self.curr_goal)
-
-        # data = {
-        #     "pos": self.pos.tolist(), "rotm":R.tolist(), 'theta':0,
-        #     "goal": self.rel_goal.tolist(),
-        #     "obstacles":self.obstacles,
-        #     "ranges": self.lidar_ranges
-        # }
-        # with open('/home/ubuntu/jackal_ws/src/the-barn-challenge/data.jsonl', 'a') as f:
-        #     json.dump(data, f, separators=(',', ':'))
-        #     f.write('\n')
+            path = np.array(path)
+            outside_poly = (polytope.A @ path.T > polytope.b[:,None]).any(0)
+            if any(outside_poly) and len(path) > 3:
+                self.curr_rel_goal = path[outside_poly][0]
+            else:
+                self.curr_rel_goal = path[1]
+        self.curr_goal = R.T @ self.curr_rel_goal + self.pos
+        
 
         pos, theta = np.zeros(2), 0
-        g_dir = self.curr_goal - pos
+        g_dir = self.curr_rel_goal - pos
         h_dir = np.array([math.cos(theta), math.sin(theta)])
         hp_dir = np.array([-math.sin(theta), math.cos(theta)])
 
-        self._g = nearest_point_on_polytope(self.curr_goal, polytope, pos)
+        self._g = nearest_point_on_polytope(self.curr_rel_goal, polytope, pos)
         self._gw = point_on_polytope_given_direction(pos, g_dir, polytope)
         self._gv = point_on_polytope_given_direction(pos, h_dir, polytope)
-        
-        q = (self._g + self._gw)/2 - pos
-        velocity = self.control_gain * h_dir @ (self._gv - pos)
-        omega = self.control_gain * math.atan2((hp_dir @ q), (h_dir @ q))
-        
-        if np.linalg.norm(self.rel_goal) > 3 or len(path) > 2:
-            max_vel = 1.0  
-        else:
-            max_vel = np.inf 
-        #1.0 if len(path) > 2 else np.inf
-        velocity = max(min(velocity, max_vel), -max_vel)
-        # print(f'v:{velocity}, w:{omega}, d:{np.linalg.norm(self.rel_goal)}')
+
+        alpha = 0.5
+        q = alpha*self._g + (1 - alpha)*self._gw - pos
+        turn_angle = math.atan2((hp_dir @ q), (h_dir @ q))
+        kw = self.control_gain
+        kv = self.control_gain * math.exp(-4.5 * abs(turn_angle)) 
+        velocity = kv * h_dir @ (self._gv - pos)
+        omega = kw * turn_angle
+
+        # velocity = max(min(omega, 2.0), -2.0)
+        omega = max(min(omega, 1.5), -1.5)
+        # print(f'v:{velocity}, w:{omega}')
         return velocity, omega
 
     def publish_markers(self):
@@ -184,7 +194,7 @@ class NavigationNode:
             marker_array.markers.append(voro_marker)
             marker_id += 1
         
-        points = [self.rel_goal, self.curr_goal, self._g, self._gw, self._gv]
+        points = [self.rel_goal, self.curr_rel_goal, self._g, self._gw, self._gv]
         if len(points) > 0:
             pts_marker = Marker()
             pts_marker.header.frame_id = self.lidar_frame_id

@@ -19,6 +19,7 @@ class Node:
 
 
 class GlobalPlanner:
+    '''Tangent Intersection Guidance (TIG) Algorithm'''
     def __init__(self, r_safe=0.1, r_vir=0.0, wg=1.0, wh=1.0, max_depth=float('inf')):
         self.r_safe = r_safe
         self.r_vir = r_vir

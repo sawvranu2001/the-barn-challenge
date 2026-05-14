@@ -191,7 +191,6 @@ def compute_centroid(geom, vertices, faces=None, is_sorted=False):
     return C
 
 def get_polygon_centroid_area(vertices, is_sorted=False, only_area=False):
-    '''https://paulbourke.net/geometry/polygonmesh/centroid.pdf'''
     n_vertices = len(vertices)
     if n_vertices < 3:
         raise ValueError("There must be at least 3 vertices.")
