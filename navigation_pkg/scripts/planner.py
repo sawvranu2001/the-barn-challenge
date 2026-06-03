@@ -62,14 +62,14 @@ class NavigationNode:
         self.obstacle_detector = None
         self.obstacles = None
         
-        # r_safe = 0.2 #math.sqrt((0.420**2 + 0.310**2))/2
-        self.global_planner = GlobalPlanner(r_safe=0.27, wp=1.0)
+        r_safe = 0.27 #math.sqrt((0.420**2 + 0.310**2))/2
+        self.global_planner = GlobalPlanner(r_safe=r_safe, wp=1.0)
         self.smooth_path = SmoothPath(smoothing_distance=0.2, num_points=5)
         
-        # self.safe_area = SafeArea(0.27, xlim=[-2,2], ylim=[-2,2])
+        # self.safe_area = SafeArea(r_safe, xlim=[-2,2], ylim=[-2,2])
         # self.recfeed = ReactiveFeedback(control_gain=2.5)
 
-        self.safe_corr = SafeCorridor(r_safe=0.27, Lmax=0.4, h=2.5, ds=0.2)
+        self.safe_corr = SafeCorridor(r_safe=r_safe, Lmax=0.4, h=2.5, ds=0.2)
         self.mpc = CoridorMPC(N=10, max_faces=50, max_poly=10, max_v=1.0, max_omega=1.5)
         
         
