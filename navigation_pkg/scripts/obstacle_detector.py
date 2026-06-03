@@ -1,5 +1,21 @@
 import math
 
+class Obstacles:
+    def __init__(self, points, segments=[], circles=[]):
+        self.points = points
+        self.segments = segments
+        self.circles = circles
+    
+    def __len__(self):
+        return len(self.segments) + len(self.circles)
+    
+    def __getitem__(self, index):
+        if index < len(self.segments):
+            O = self.segments[index]
+        else:
+            O = self.circles[index - len(self.segments)]
+        return O
+
 class ObstacleDetector:
     '''
     A line segment extraction algorithm using laser data based on seeded region growing
@@ -36,22 +52,26 @@ class ObstacleDetector:
         self.r_max = r_max
         self.si_max_c = si_max_c
 
-    def _cartesian(self, all_R):
+    def _cartesian(self, all_R, pose):
+        x, y, theta = pose
         P, R, a = [], [], []
         for i, r in enumerate(all_R):
             if math.isfinite(r):
                 R.append(r)
                 a.append(i*self.delta_angle + self.min_angle)
-                P.append((r*math.cos(a[-1]), r*math.sin(a[-1])))
+                P.append((r*math.cos(a[-1] + theta) + x, 
+                          r*math.sin(a[-1] + theta) + y))
         return P, R, a
 
-    def __call__(self, all_ranges):
-        points, ranges, angles = self._cartesian(all_ranges)
-
-        res = {'points':points}
-        res['lines'] = self.line_extraction(points, ranges)
-        res['circles'] = self.circle_extraction(points, *res['lines'])
-        # print(len(points))
+    def __call__(self, all_ranges, pose=(0.0, 0.0, 0.0)):
+        points, ranges, angles = self._cartesian(all_ranges, pose)
+        try:
+            lines = self.line_extraction(points, ranges)
+            circles = self.circle_extraction(points, *lines)
+        except:
+            lines = [], [], []
+            circles = [], []
+        res = Obstacles(points, lines[2], circles[0])
         return res
     
     def circle_extraction(self, points, Fl, Idl, BPl):

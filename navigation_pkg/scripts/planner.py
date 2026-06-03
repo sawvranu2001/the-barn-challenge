@@ -16,8 +16,24 @@ import time
 import json
 
 from obstacle_detector import ObstacleDetector
-from voronoi import Voronoi, nearest_point_on_polytope, point_on_polytope_given_direction
-from global_planner import GlobalPlanner
+from global_planner import GlobalPlanner, SmoothPath
+from safearea import SafeCorridor, SafeArea
+from control import CoridorMPC, ReactiveFeedback
+
+
+def transform_coord(p, pose, w2l=True):
+    x, y, theta = pose
+    c, s = math.cos(theta), math.sin(theta)
+    px, py =  p
+    if w2l:
+        d = (px - x, py - y)
+        px_n =  c*d[0] + s*d[1]
+        py_n = -s*d[0] + c*d[1]
+    else:
+        px_n = c*px - s*py + x
+        py_n = s*px + c*py + y
+    return (px_n, py_n)
+
 
 class NavigationNode:
     def __init__(self):
@@ -32,35 +48,31 @@ class NavigationNode:
         init_pos = rospy.get_param('~init_position')
         goal_pos = rospy.get_param('~goal_position')
 
-        self.init_pos = np.array(init_pos[:2])
-        self.init_theta = init_pos[2]
-        self.goal = self.init_pos + np.array(goal_pos)
+        self.init_pose = init_pos
+        self.goal = (goal_pos[0], goal_pos[1])
         
-        # Other parameters.
-        self.max_range = 4.0
-
         # Placeholders for sensor data.
+        self.marker_pub = rospy.Publisher('/obstacle_markers', MarkerArray, queue_size=1)
+        self.maker_header_frame_id = "front_laser"
+
         self.lidar_ranges = None
         self.odom_data = None
         self.model_data = None
-        self.curr_goal = None
-
-        # Others
-        self.marker_pub = rospy.Publisher('/obstacle_markers', MarkerArray, queue_size=1)
-        self.lidar_frame_id = "front_laser"
-
+        
         self.obstacle_detector = None
         self.obstacles = None
         
-        # safety_radius = 0.2 #math.sqrt((0.420**2 + 0.310**2))/2
-        self.voronoi = Voronoi(
-            pos=np.zeros(2), 
-            safety_radius=0.2, 
-            xlim=[-5,5], ylim=[-5,5]
-        )
-        self.global_planner = GlobalPlanner(r_safe=0.27, r_vir=0.05)
-        self.control_gain = 2.5
-    
+        # r_safe = 0.2 #math.sqrt((0.420**2 + 0.310**2))/2
+        self.global_planner = GlobalPlanner(r_safe=0.27, wp=1.0)
+        self.smooth_path = SmoothPath(smoothing_distance=0.2, num_points=5)
+        
+        # self.safe_area = SafeArea(0.27, xlim=[-2,2], ylim=[-2,2])
+        # self.recfeed = ReactiveFeedback(control_gain=2.5)
+
+        self.safe_corr = SafeCorridor(r_safe=0.27, Lmax=0.4, h=2.5, ds=0.2)
+        self.mpc = CoridorMPC(N=10, max_faces=50, max_poly=10, max_v=1.0, max_omega=1.5)
+        
+        
     def odom_callback(self, msg):
         self.odom_data = msg
         x = msg.pose.pose.position.x
@@ -73,8 +85,7 @@ class NavigationNode:
             theta += 2*math.pi
         elif theta > math.pi:
             theta -= 2*math.pi
-        self.pos = self.init_pos + np.array([x, y])
-        self.theta = theta
+        self.pose = (x, y, theta)
     
     def model_callback(self, msg):
         self.model_data = msg
@@ -98,106 +109,54 @@ class NavigationNode:
             # print(f"{len(self.obstacles['points'])}, Nl: {len(self.obstacles['lines'][0])}, Nc: {len(self.obstacles['circles'][0])}")
         except Exception as e:
             rospy.logwarn(f"Obstacle extraction failed this frame: {e}")
-
+    
     def control(self):
-        polytope = self.voronoi.cell.poly
-        
-        R = np.array([
-            [math.cos(self.theta), math.sin(self.theta)],
-            [-math.sin(self.theta), math.cos(self.theta)]
-        ])
-        self.rel_goal = R @ (self.goal - self.pos)
-        
-        # DIST_TOLERANCE = 0.4
-        # replan = True
-        # if self.curr_goal is not None:
-        #     dist_to_goal = np.linalg.norm(self.curr_goal - self.pos)
-        #     prev_rel_goal = R @ (self.curr_goal - self.pos)
-        #     outside_poly = (polytope.A @ prev_rel_goal > polytope.b[:,None]).any()
-        #     if outside_poly and dist_to_goal > DIST_TOLERANCE:
-        #         # print('d', dist_to_goal, outside_poly)
-        #         replan = False
-        #         self.curr_rel_goal = prev_rel_goal
+        self.rel_goal = transform_coord(self.goal, self.pose, w2l=True)
+        rel_pose = (0.0, 0.0, 0.0)
 
-        # if replan:
-        #     # print('replan')
-        path = self.global_planner((0.0, 0.0), self.rel_goal, self.obstacles)
-        if not path:
-            self.curr_rel_goal = self.rel_goal
+
+        self.path = self.global_planner(rel_pose[:2], self.rel_goal, self.obstacles)
+        if not self.path:
             rospy.logwarn(f"Path generation failed")
-        else:
-            path = np.array(path)
-            outside_poly = (polytope.A @ path.T > polytope.b[:,None]).any(0)
-            if any(outside_poly) and len(path) > 3:
-                self.curr_rel_goal = path[outside_poly][0]
-            else:
-                self.curr_rel_goal = path[1]
-        self.curr_goal = R.T @ self.curr_rel_goal + self.pos
-        
+            velocity, omega = 0.0, 0.0
+        else:            
+            # self.path = self.smooth_path(self.path)
 
-        pos, theta = np.zeros(2), 0
-        g_dir = self.curr_rel_goal - pos
-        h_dir = np.array([math.cos(theta), math.sin(theta)])
-        hp_dir = np.array([-math.sin(theta), math.cos(theta)])
+            P, P_poly = self.safe_corr(self.path, self.obstacles)
+            try:
+                # st = time.time()
+                opt_U, self.pred_traj, dt = self.mpc.solve(rel_pose, P, P_poly)
+                # print(time.time() - st, self.mpc.solver.get_stats('time_tot'), 
+                #       'iter=', self.mpc.solver.get_stats('nlp_iter'),'\t')
 
-        self._g = nearest_point_on_polytope(self.curr_rel_goal, polytope, pos)
-        self._gw = point_on_polytope_given_direction(pos, g_dir, polytope)
-        self._gv = point_on_polytope_given_direction(pos, h_dir, polytope)
+                velocity = opt_U[0,0]
+                omega = opt_U[0,1]
+            except:
+                rospy.logwarn(f"MPC failed")
+                self.pred_traj = np.array([])
+                velocity = 0.0
+                omega = 0.0
 
-        alpha = 0.5
-        q = alpha*self._g + (1 - alpha)*self._gw - pos
-        turn_angle = math.atan2((hp_dir @ q), (h_dir @ q))
-        kw = self.control_gain
-        kv = self.control_gain * math.exp(-4.5 * abs(turn_angle)) 
-        velocity = kv * h_dir @ (self._gv - pos)
-        omega = kw * turn_angle
+            # self.path = np.asarray(self.path)
+            # poly = self.safe_area(rel_pose[:2], self.obstacles)
+            # outside_poly = (poly.A @ self.path.T > poly.b[:,None]).any(0)
+            # if any(outside_poly) and len(self.path) > 3:
+            #     curr_rel_goal = self.path[outside_poly][0]
+            # else:
+            #     curr_rel_goal = self.path[1]
+            # velocity, omega = self.recfeed(rel_pose, curr_rel_goal, poly)
 
-        # velocity = max(min(omega, 2.0), -2.0)
-        omega = max(min(omega, 1.5), -1.5)
         # print(f'v:{velocity}, w:{omega}')
         return velocity, omega
 
     def publish_markers(self):
         marker_array = MarkerArray()
         marker_id = 0
-
-        vertices = self.voronoi.cell.poly.vertices            
-        if len(vertices) >= 3: # A polygon needs at least 3 points
-            voro_marker = Marker()
-            voro_marker.header.frame_id = self.lidar_frame_id
-            voro_marker.header.stamp = rospy.Time.now()
-            voro_marker.ns = "extracted_polytope"
-            voro_marker.id = marker_id
-            voro_marker.type = Marker.LINE_STRIP  # Connects points into a shape
-            voro_marker.action = Marker.ADD
-            voro_marker.pose.orientation.w = 1.0
-
-            voro_marker.scale.x = 0.05 # Thickness of the polygon boundary
-
-            # Color: Bright Magenta/Purple to stand out from obstacles
-            voro_marker.color.r = 1.0
-            voro_marker.color.g = 0.0
-            voro_marker.color.b = 1.0
-            voro_marker.color.a = 0.8 
-
-            # Add all vertices to the marker
-            for v in vertices:
-                # Safety check against inf/NaN
-                if not (math.isinf(v[0]) or math.isnan(v[0])):
-                    voro_marker.points.append(Point(x=v[0], y=v[1], z=0.0))
-
-            # Close the polygon loop by adding the first vertex at the end
-            if len(voro_marker.points) > 0:
-                first_point = voro_marker.points[0]
-                voro_marker.points.append(first_point)
-
-            marker_array.markers.append(voro_marker)
-            marker_id += 1
         
-        points = [self.rel_goal, self.curr_rel_goal, self._g, self._gw, self._gv]
+        points = [self.rel_goal]
         if len(points) > 0:
             pts_marker = Marker()
-            pts_marker.header.frame_id = self.lidar_frame_id
+            pts_marker.header.frame_id = self.maker_header_frame_id
             pts_marker.header.stamp = rospy.Time.now()
             pts_marker.ns = "extracted_g" 
             pts_marker.id = marker_id
@@ -205,32 +164,71 @@ class NavigationNode:
             pts_marker.action = Marker.ADD
             pts_marker.pose.orientation.w = 1.0
 
-            # Scale sets the diameter of the spheres in meters
             pts_marker.scale.x = 0.15 
             pts_marker.scale.y = 0.15
             pts_marker.scale.z = 0.15
 
-            # Color: Bright Yellow / Gold
             pts_marker.color.r = 1.0
             pts_marker.color.g = 0.8
             pts_marker.color.b = 0.0
             pts_marker.color.a = 1.0 
 
-            # Add all 4 points to the marker
             for pt in points:
-                # Safety check against inf/NaN
                 if not (math.isinf(pt[0]) or math.isnan(pt[0])):
                     pts_marker.points.append(Point(x=pt[0], y=pt[1], z=0.0))
 
             marker_array.markers.append(pts_marker)
             marker_id += 1
 
+        path_marker = Marker()
+        path_marker.header.frame_id = self.maker_header_frame_id
+        path_marker.header.stamp = rospy.Time.now()
+        path_marker.ns = "global_path"
+        path_marker.id = marker_id
+        path_marker.type = Marker.LINE_STRIP
+        path_marker.action = Marker.ADD
+        path_marker.pose.orientation.w = 1.0
+        path_marker.scale.x = 0.05 
         
-        Fl, Idl, BPl = self.obstacles.get('lines', ([], [], []))
-        Fc, Idc = self.obstacles.get('circles', ([], []))
-        if BPl:
+        path_marker.color.r = 0.0
+        path_marker.color.g = 1.0
+        path_marker.color.b = 1.0
+        path_marker.color.a = 1.0
+
+        if self.path is not None:
+            for pt in self.path:
+                if math.isfinite(pt[0]) and math.isfinite(pt[1]):
+                    path_marker.points.append(Point(x=pt[0], y=pt[1], z=0.0))
+
+        marker_array.markers.append(path_marker)
+        marker_id += 1
+
+        # path_marker = Marker()
+        # path_marker.header.frame_id = self.maker_header_frame_id
+        # path_marker.header.stamp = rospy.Time.now()
+        # path_marker.ns = "global_path"
+        # path_marker.id = marker_id
+        # path_marker.type = Marker.LINE_STRIP
+        # path_marker.action = Marker.ADD
+        # path_marker.pose.orientation.w = 1.0
+        # path_marker.scale.x = 0.05 
+        
+        # path_marker.color.r = 1.0
+        # path_marker.color.g = 0.0
+        # path_marker.color.b = 1.0
+        # path_marker.color.a = 1.0
+
+        # if self.pred_traj is not None:
+        #     for pt in self.pred_traj:
+        #         if math.isfinite(pt[0]) and math.isfinite(pt[1]):
+        #             path_marker.points.append(Point(x=pt[0], y=pt[1], z=0.0))
+
+        # marker_array.markers.append(path_marker)
+        # marker_id += 1
+        
+        if self.obstacles.segments:
             line_marker = Marker()
-            line_marker.header.frame_id = self.lidar_frame_id
+            line_marker.header.frame_id = self.maker_header_frame_id
             line_marker.header.stamp = rospy.Time.now()
             line_marker.ns = "extracted_lines"
             line_marker.id = marker_id
@@ -239,17 +237,14 @@ class NavigationNode:
 
             line_marker.pose.orientation.w = 1.0 
             
-            # Line thickness
             line_marker.scale.x = 0.05 
             
-            # Color: Green
             line_marker.color.r = 0.0
             line_marker.color.g = 1.0
             line_marker.color.b = 0.0
             line_marker.color.a = 1.0
 
-            # BPl contains lists of endpoints for each segment: [(x1,y1), (x2,y2)]
-            for segment in BPl:
+            for segment in self.obstacles.segments:
                 p1, p2 = segment
                 line_marker.points.append(Point(x=p1[0], y=p1[1], z=0.0))
                 line_marker.points.append(Point(x=p2[0], y=p2[1], z=0.0))
@@ -257,12 +252,11 @@ class NavigationNode:
             marker_array.markers.append(line_marker)
             marker_id += 1
 
-        # 3. CREATE CIRCLE MARKERS
-        for circle in Fc:
-            a, b, r = circle # x-center, y-center, radius
+        for circle in self.obstacles.circles:
+            a, b, r = circle 
             
             circle_marker = Marker()
-            circle_marker.header.frame_id = self.lidar_frame_id
+            circle_marker.header.frame_id = self.maker_header_frame_id
             circle_marker.header.stamp = rospy.Time.now()
             circle_marker.ns = "extracted_circles"
             circle_marker.id = marker_id
@@ -275,16 +269,14 @@ class NavigationNode:
             circle_marker.pose.position.z = 0.0            
             circle_marker.pose.orientation.w = 1.0
 
-            # Scale (Cylinder diameter is 2 * radius)
             circle_marker.scale.x = 2.0 * r
             circle_marker.scale.y = 2.0 * r
-            circle_marker.scale.z = 0.1 # Flat disc height
+            circle_marker.scale.z = 0.1
 
-            # Color: Blue
             circle_marker.color.r = 0.0
             circle_marker.color.g = 0.5
             circle_marker.color.b = 1.0
-            circle_marker.color.a = 0.6 # Slightly transparent
+            circle_marker.color.a = 0.6
 
             marker_array.markers.append(circle_marker)
             marker_id += 1
@@ -299,8 +291,6 @@ class NavigationNode:
             if self.lidar_ranges is None or self.odom_data is None:
                 rate.sleep()
                 continue
-            
-            self.voronoi(self.obstacles)
 
             velocity, omega = self.control()
             

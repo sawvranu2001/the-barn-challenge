@@ -12,8 +12,6 @@ From: osrf/ros:melodic-desktop-full
     apt-get -y update && apt-get -y upgrade
     apt-get -y install \
         git curl \
-        python3-pip python3-venv \
-        libcdd-dev libgmp-dev \
         ros-melodic-jackal-simulator \
         ros-melodic-jackal-desktop \
         ros-melodic-jackal-navigation
@@ -40,7 +38,18 @@ From: osrf/ros:melodic-desktop-full
         transforms3d \
         scipy \
         scikit-learn \
-        pycddlib
+
+    git clone https://github.com/acados/acados.git && \
+        cd /acados && git submodule update --recursive --init && \
+        mkdir -p build && cd build && \
+        cmake -DACADOS_WITH_QPOASES=ON .. \
+        && make install -j4 
+
+    export ACADOS_SOURCE_DIR="/acados"
+    export LD_LIBRARY_PATH=$LD_LIBRARY_PATH:"$ACADOS_SOURCE_DIR/lib"
+    uv pip install -e "$ACADOS_SOURCE_DIR/interfaces/acados_template"
+    python -c "from acados_template import get_tera; get_tera(tera_version='0.0.34', force_download=True)"
+
     
     # Build workspace
     source /opt/ros/melodic/setup.bash
@@ -52,3 +61,5 @@ From: osrf/ros:melodic-desktop-full
     export VIRTUAL_ENV="/opt/venv"
     export PATH="$VIRTUAL_ENV/bin:$PATH"
     export UV_PYTHON_INSTALL_DIR="/opt/uv_python"
+    export ACADOS_SOURCE_DIR="/acados"
+    export LD_LIBRARY_PATH=$LD_LIBRARY_PATH:"$ACADOS_SOURCE_DIR/lib"

@@ -36,9 +36,7 @@ RUN echo "source /opt/ros/${ROS_DISTRO}/setup.bash" >> ~/.bashrc
 ## ADD ANY CUSTOM SETUP BELOW ##
 ################################
 
-RUN sudo apt-get update && \
-    sudo apt-get install -y curl libcdd-dev libgmp-dev && \
-    sudo ln -s /usr/include/cdd /usr/include/cddlib
+RUN sudo apt-get update && sudo apt-get install -y curl
 
 # Create a virtual environment
 COPY --from=ghcr.io/astral-sh/uv:latest /uv /uvx /bin/
@@ -47,10 +45,19 @@ ENV VIRTUAL_ENV="/home/$USERNAME/venv"
 ENV PATH="$VIRTUAL_ENV/bin:$PATH"
 
 # install dependencies
-RUN uv pip install defusedxml rospkg netifaces numpy transforms3d scipy scikit-learn pycddlib
+RUN uv pip install defusedxml rospkg netifaces numpy transforms3d scipy scikit-learn osqp
 
 RUN sudo apt install ros-melodic-desktop-full --fix-missing
 RUN sudo apt install -y ros-melodic-jackal-simulator ros-melodic-jackal-desktop ros-melodic-jackal-navigation
+
+WORKDIR /home/$USERNAME/
+RUN git clone https://github.com/acados/acados.git && cd acados && git submodule update --recursive --init && \
+    mkdir -p build && cd build && cmake -DACADOS_WITH_QPOASES=ON .. && make install -j4 
+
+ENV ACADOS_SOURCE_DIR="/home/$USERNAME/acados"
+ENV LD_LIBRARY_PATH=$LD_LIBRARY_PATH:"$ACADOS_SOURCE_DIR/lib"
+RUN uv pip install -e "$ACADOS_SOURCE_DIR/interfaces/acados_template"
+RUN python -c "from acados_template import get_tera; get_tera(tera_version='0.0.34', force_download=True)"
 
 # setup workspace
 WORKDIR /home/$USERNAME/jackal_ws/src
