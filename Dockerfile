@@ -51,7 +51,7 @@ RUN sudo apt install ros-melodic-desktop-full --fix-missing
 RUN sudo apt install -y ros-melodic-jackal-simulator ros-melodic-jackal-desktop ros-melodic-jackal-navigation
 
 WORKDIR /home/$USERNAME/
-RUN git clone https://github.com/acados/acados.git && cd acados && git submodule update --recursive --init && \
+RUN git clone --branch v0.5.5 https://github.com/acados/acados.git && cd acados && git submodule update --recursive --init && \
     mkdir -p build && cd build && cmake -DACADOS_WITH_QPOASES=ON .. && make install -j4 
 
 ENV ACADOS_SOURCE_DIR="/home/$USERNAME/acados"
